@@ -27,6 +27,7 @@ type RoomMessage struct {
 	Data struct {
 		Message string `json:"message"`
 		RoomID  string `json:"roomId"`
+		Sender  string `json:"sender"`
 	} `json:"data"`
 }
 
@@ -50,7 +51,23 @@ func CheckTypeOfMessage(incomingMessage string, client string) interface{} {
 	case "ping":
 		event := map[string]interface{}{
 			"type": "pong",
-			"data": "pong",
+			"data": map[string]interface{}{
+				"message": "pong",
+			},
+		}
+		encodedMessage, err := json.Marshal(event)
+		if err != nil {
+			log.Default().Println("error Marshal ping: ", err)
+			return false
+		}
+		return encodedMessage
+	case "join-app":
+		event := map[string]interface{}{
+			"type": "joined",
+			"data": map[string]interface{}{
+				"message":    "Event to join app and return user connection",
+				"connection": client,
+			},
 		}
 		encodedMessage, err := json.Marshal(event)
 		if err != nil {
@@ -77,7 +94,7 @@ func CheckTypeOfMessage(incomingMessage string, client string) interface{} {
 		event := map[string]interface{}{
 			"type": "room-joined",
 			"data": map[string]interface{}{
-				"roomId": message.Data.Id,
+				"roomId": message.Data.RoomId,
 				"host":   client,
 			},
 		}
@@ -99,6 +116,7 @@ func CheckTypeOfMessage(incomingMessage string, client string) interface{} {
 				"message": roomMessage.Data.Message,
 				"sender":  client,
 				"roomId":  roomMessage.Data.RoomID,
+				"host":    client,
 			},
 		}
 		encodedMessage, err := json.Marshal(event)
@@ -140,4 +158,114 @@ func EncodeMessageToBytes(message string) []byte {
 		return nil
 	}
 	return encodedMessage
+}
+
+func ContainsClient(clients []string, client string) bool {
+	for _, c := range clients {
+		if c == client {
+			return true
+		}
+	}
+	return false
+}
+
+type MessageType interface {
+	GetType() string
+}
+
+func (m CreatedRoomMessage) GetType() string {
+	return m.Type
+}
+
+func (m RoomJoinedEvent) GetType() string {
+	return m.Type
+}
+
+func (m RoomMessage) GetType() string {
+	return m.Type
+}
+
+func (m WelcomeMessage) GetType() string {
+	return m.Type
+}
+
+func (m JoinApp) GetType() string {
+	return m.Type
+}
+
+func (m Pong) GetType() string {
+	return m.Type
+}
+
+type CreatedRoomMessage struct {
+	Type string `json:"type"`
+	Data struct {
+		Host   string `json:"host"`
+		RoomID string `json:"roomId"`
+	} `json:"data"`
+}
+
+type RoomJoinedEvent struct {
+	Type string `json:"type"`
+	Data struct {
+		Host   string `json:"host"`
+		RoomID string `json:"roomId"`
+	} `json:"data"`
+}
+
+type WelcomeMessage struct {
+	Type string `json:"type"`
+	Data struct {
+		Host   string `json:"host,omitempty"`
+		RoomID string `json:"roomId,omitempty"`
+	} `json:"data"`
+}
+
+type JoinApp struct {
+	Type string `json:"type"`
+	Data struct {
+		Message    string `json:"message"`
+		Connection string `json:"connection"`
+	} `json:"data"`
+}
+
+type Pong struct {
+	Type string `json:"type"`
+	Data struct {
+		Message string `json:"message"`
+	} `json:"data"`
+}
+
+var messageTypes = map[string]func() MessageType{
+	"room-created":    func() MessageType { return &CreatedRoomMessage{} },
+	"room-joined":     func() MessageType { return &RoomJoinedEvent{} },
+	"room-message":    func() MessageType { return &RoomMessage{} },
+	"welcome-message": func() MessageType { return &WelcomeMessage{} },
+	"join-app":        func() MessageType { return &JoinApp{} },
+	"pong":            func() MessageType { return &Pong{} },
+}
+
+func ProcessMessage(message []byte) (MessageType, error) {
+	var raw_msg map[string]interface{}
+	if err := json.Unmarshal(message, &raw_msg); err != nil {
+		return nil, fmt.Errorf("error trying to unmarshal raw_msg: %v", err)
+	}
+
+	msg_type, ok := raw_msg["type"].(string)
+	fmt.Println("ProcessMessage: ", msg_type)
+	if !ok {
+		return nil, fmt.Errorf("error trying to cast msg_type: %v", ok)
+	}
+
+	msg_factory, ok := messageTypes[msg_type]
+	if !ok {
+		return nil, fmt.Errorf("error trying to get msg_factory: %v", ok)
+	}
+
+	msg := msg_factory()
+	if err := json.Unmarshal(message, msg); err != nil {
+		return nil, fmt.Errorf("error trying to unmarshal msg: %v", err)
+	}
+
+	return msg, nil
 }

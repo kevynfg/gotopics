@@ -28,42 +28,9 @@ type Client struct {
 	send chan []byte
 }
 
-type CreatedRoomMessage struct {
-	Type string `json:"type"`
-	Data struct {
-		Host   string `json:"host"`
-		RoomID string `json:"roomId"`
-	} `json:"data"`
-}
-
-type RoomMessage struct {
-	Type string `json:"type"`
-	Data struct {
-		Message string `json:"message"`
-		RoomID  string `json:"roomId"`
-		Host    string `json:"host"`
-	} `json:"data"`
-}
-
-type RoomJoinedEvent struct {
-	Type string `json:"type"`
-	Data struct {
-		Host   string `json:"host"`
-		RoomID string `json:"roomId"`
-	} `json:"data"`
-}
-
-type WelcomeMessage struct {
-	Type string `json:"type"`
-	Data struct {
-		Host   string `json:"host"`
-		RoomID string `json:"roomId"`
-	} `json:"data"`
-}
-
 const (
 	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
+	writeWait = 20 * time.Second
 
 	// Time allowed to read the next pong message from the peer.
 	pongWait = 60 * time.Second
@@ -74,61 +41,6 @@ const (
 	// Maximum message size allowed from peer.
 	maxMessageSize = 512
 )
-
-func (c *Client) readPump() {
-	defer func() {
-		c.hub.unregister <- c
-		c.conn.Close()
-	}()
-	c.conn.SetReadLimit(maxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
-	for {
-		_, message, err := c.conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
-			}
-			break
-		}
-		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		message = utils.CheckTypeOfMessage(string(message), c.conn.RemoteAddr().String()).([]byte)
-		c.hub.broadcast <- message
-	}
-}
-
-func (c *Client) writePump() {
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.conn.Close()
-	}()
-	for {
-		select {
-		case message, ok := <-c.send:
-			fmt.Println("message inside writePump: ", string(message))
-			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				w.Write(newline)
-				w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
-				return
-			}
-		}
-	}
-}
 
 type Hub struct {
 	// Registered clients.
@@ -159,40 +71,29 @@ func NewHub() *Hub {
 	}
 }
 
-type Message interface {
-	GetType() string
-}
-
-func (m CreatedRoomMessage) GetType() string {
-	return m.Type
-}
-
-func (m RoomJoinedEvent) GetType() string {
-	return m.Type
-}
-
-func (m RoomMessage) GetType() string {
-	return m.Type
-}
-
-func (m WelcomeMessage) GetType() string {
-	return m.Type
-}
-
-var messageTypes = map[string]func() Message{
-	"room-created":    func() Message { return &CreatedRoomMessage{} },
-	"room-joined":     func() Message { return &RoomJoinedEvent{} },
-	"room-message":    func() Message { return &RoomMessage{} },
-	"welcome-message": func() Message { return &WelcomeMessage{} },
-}
-
 func (h *Hub) Run() {
+	var incomingMessage string
 	for {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
+			clientInfo := map[string]interface{}{
+				"type": "client-login",
+				"data": map[string]interface{}{
+					"client": client.conn.RemoteAddr().String(),
+				},
+			}
+			incomingMessageBytes, err := json.Marshal(clientInfo)
+			if err != nil {
+				fmt.Println("error marshaling incoming message for user info: ", err)
+				return
+			}
+			incomingMessage = string(incomingMessageBytes)
+			client.send <- []byte(incomingMessage)
 		case client := <-h.unregister:
+			fmt.Println("client inside unregister: ", client)
 			if _, ok := h.clients[client]; ok {
+				fmt.Println("unregistering: ", client)
 				delete(h.clients, client)
 				delete(h.rooms, client.conn.RemoteAddr().String())
 				close(client.send)
@@ -200,33 +101,16 @@ func (h *Hub) Run() {
 		case message := <-h.broadcast:
 			fmt.Println("message inside broadcast: ", string(message))
 
-			var rawMsg map[string]interface{}
-			if err := json.Unmarshal(message, &rawMsg); err != nil {
-				fmt.Println("error trying to unmarshal rawMsg: ", err)
+			msgType, err := utils.ProcessMessage(message)
+			if err != nil {
+				fmt.Println("error processing message: ", err)
 				return
 			}
 
-			msgType, ok := rawMsg["type"].(string)
-			if !ok {
-				fmt.Println("error trying to cast msgType: ", ok)
-				return
-			}
-
-			msgFactory, ok := messageTypes[msgType]
-			if !ok {
-				fmt.Println("error trying to get msgFactory: ", ok)
-				return
-			}
-
-			msg := msgFactory()
-			if err := json.Unmarshal(message, msg); err != nil {
-				fmt.Println("error trying to unmarshal msg: ", err)
-				return
-			}
 			host := ""
 			var foundClient *Client
-			switch msg := msg.(type) {
-			case *CreatedRoomMessage:
+			switch msg := msgType.(type) {
+			case *utils.CreatedRoomMessage:
 				fmt.Println("CreatedRoomMessage: ", msg)
 				messageTypes := []string{"room-created", "room-joined", "room-message"}
 				if utils.Contains(messageTypes, msg.Type) {
@@ -238,57 +122,59 @@ func (h *Hub) Run() {
 						}
 					}
 				}
-			case *RoomJoinedEvent:
+			case *utils.RoomJoinedEvent:
 				fmt.Println("RoomJoinedEvent: ", msg)
 				messageTypes := []string{"room-created", "room-joined", "room-message"}
 				if utils.Contains(messageTypes, msg.Type) {
 					host = msg.Data.Host
 					for client := range h.clients {
-						if client.conn.RemoteAddr().String() == host && client.hub.rooms[msg.Data.RoomID] != nil
-						&& client.hub.rooms[msg.Data.RoomID] {
+						if client.conn.RemoteAddr().String() == host && client.hub.rooms[msg.Data.RoomID] != nil &&
+							utils.ContainsClient(getClientAddresses(client.hub.rooms[msg.Data.RoomID]), client.conn.RemoteAddr().String()) {
 							if client.conn.RemoteAddr().String() == msg.Data.Host {
-
+								continue
 							}
 							foundClient = client
 							break
 						}
 					}
 				}
-			case *RoomMessage:
-				fmt.Println("RoomMessage: ", msg)
-				messageTypes := []string{"room-created", "room-joined", "room-message"}
-				if utils.Contains(messageTypes, msg.Type) {
-					host = msg.Data.Host
-					for client := range h.clients {
-						if client.conn.RemoteAddr().String() == host {
-							foundClient = client
-							break
-						}
-					}
-				}
+				// case *utils.RoomMessage:
+				// 	fmt.Println("RoomMessage: ", msg)
+				// 	messageTypes := []string{"room-created", "room-joined", "room-message"}
+				// 	if utils.Contains(messageTypes, msg.Type) {
+				// 		host = msg.Data.Sender
+				// 		for client := range h.clients {
+				// 			if client.conn.RemoteAddr().String() == host {
+				// 				foundClient = client
+				// 				break
+				// 			}
+				// 		}
+				// 	}
 			}
 
 			for client := range h.clients {
-				incomingMessage := ""
-				if client == foundClient && msg.GetType() != "room-created" {
+				if client == foundClient && msgType.GetType() != "room-created" {
 					fmt.Println("found client, skipping message: ", client)
 					continue
 				}
-				if msg.GetType() == "room-joined" {
-					fmt.Println("room-joined if: ", msg.(*RoomJoinedEvent))
+				if msgType.GetType() == "room-joined" {
+					fmt.Println("room-joined if: ", msgType.(*utils.RoomJoinedEvent).Data.RoomID)
 					h.mu.RLock()
-					_, ok := h.rooms[msg.(*RoomJoinedEvent).Data.RoomID]
+					_, ok := h.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID]
+					fmt.Println("room-joined if -> res: ", ok)
 					h.mu.RUnlock()
 					if ok {
-						fmt.Println("room-joined if -> ok: ", msg.(*RoomJoinedEvent))
-						h.mu.RLock()
-						fmt.Println("currentRoom: ", h.rooms[msg.(*RoomJoinedEvent).Data.RoomID])
-						h.mu.RUnlock()
+						if client.conn.RemoteAddr().String() == msgType.(*utils.RoomJoinedEvent).Data.Host {
+							client.hub.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID] = append(client.hub.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID], client)
+						}
 						joinMessageForRoom := map[string]interface{}{
 							"type": "welcome-message",
 							"data": map[string]interface{}{
-								"host":   msg.(*RoomJoinedEvent).Data.Host,
-								"roomId": msg.(*RoomJoinedEvent).Data.RoomID,
+								"host":        msgType.(*utils.RoomJoinedEvent).Data.Host,
+								"roomId":      msgType.(*utils.RoomJoinedEvent).Data.RoomID,
+								"message":     "Welcome to the room",
+								"clients":     getClientAddresses(h.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID]),
+								"isNewMember": true,
 							},
 						}
 						incomingMessageBytes, err := json.Marshal(joinMessageForRoom)
@@ -296,17 +182,14 @@ func (h *Hub) Run() {
 							fmt.Println("error marshaling incoming message: ", err)
 							return
 						}
-						if client.conn.RemoteAddr().String() == msg.(*RoomJoinedEvent).Data.Host {
-							client.hub.rooms[msg.(*RoomJoinedEvent).Data.RoomID] = append(client.hub.rooms[msg.(*RoomJoinedEvent).Data.RoomID], client)
-						}
 						h.mu.RLock()
-						fmt.Println("room after add: ", h.rooms[msg.(*RoomJoinedEvent).Data.RoomID])
+						fmt.Println("room after add: ", h.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID])
 						h.mu.RUnlock()
 
 						h.mu.RLock()
-						for _, c := range h.rooms[msg.(*RoomJoinedEvent).Data.RoomID] {
+						for _, c := range h.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID] {
 							fmt.Println("client loop: ", c.conn.RemoteAddr().String())
-							if c.conn.RemoteAddr().String() == msg.(*RoomJoinedEvent).Data.Host {
+							if c.conn.RemoteAddr().String() == msgType.(*utils.RoomJoinedEvent).Data.Host {
 								continue
 							}
 							incomingMessage = string(incomingMessageBytes)
@@ -315,18 +198,18 @@ func (h *Hub) Run() {
 					}
 				}
 
-				if msg.GetType() == "room-created" {
-					if client.conn.RemoteAddr().String() != msg.(*CreatedRoomMessage).Data.Host {
+				if msgType.GetType() == "room-created" {
+					if client.conn.RemoteAddr().String() != msgType.(*utils.CreatedRoomMessage).Data.Host {
 						continue
 					}
-					client.hub.rooms[msg.(*CreatedRoomMessage).Data.RoomID] = append(client.hub.rooms[msg.(*CreatedRoomMessage).Data.RoomID], client)
+					client.hub.rooms[msgType.(*utils.CreatedRoomMessage).Data.RoomID] = append(client.hub.rooms[msgType.(*utils.CreatedRoomMessage).Data.RoomID], client)
 					fmt.Println("room created and client joined: ", client.hub.rooms)
 					fmt.Println("room-created:client: ", client.conn.RemoteAddr().String())
 					incomingMessageMap := map[string]interface{}{
 						"type": "room-created",
 						"data": map[string]interface{}{
-							"host":   msg.(*CreatedRoomMessage).Data.Host,
-							"roomId": msg.(*CreatedRoomMessage).Data.RoomID,
+							"host":   msgType.(*utils.CreatedRoomMessage).Data.Host,
+							"roomId": msgType.(*utils.CreatedRoomMessage).Data.RoomID,
 						},
 					}
 					incomingMessageBytes, err := json.Marshal(incomingMessageMap)
@@ -335,6 +218,28 @@ func (h *Hub) Run() {
 						return
 					}
 					incomingMessage = string(incomingMessageBytes)
+				}
+
+				if msgType.GetType() == "room-message" {
+					fmt.Println("room-message: ", msgType.(*utils.RoomMessage).Data.RoomID)
+					h.mu.RLock()
+					_, ok := h.rooms[msgType.(*utils.RoomMessage).Data.RoomID]
+					fmt.Println("room-message -> res: ", ok)
+					h.mu.RUnlock()
+					if ok {
+						h.mu.RLock()
+						for _, c := range h.rooms[msgType.(*utils.RoomMessage).Data.RoomID] {
+							fmt.Println("client loop: ", c.conn.RemoteAddr().String())
+							// if c.conn.RemoteAddr().String() == msgType.(*utils.RoomMessage).Data.Host {
+							// 	continue
+							// }
+							if !utils.Contains(getClientAddresses(h.rooms[msgType.(*utils.RoomMessage).Data.RoomID]), client.conn.RemoteAddr().String()) {
+								continue
+							}
+							incomingMessage = string(message)
+						}
+						h.mu.RUnlock()
+					}
 				}
 				fmt.Println("Message: ", incomingMessage)
 				select {
@@ -371,6 +276,76 @@ func handler(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	client.hub.register <- client
 	go client.writePump()
 	go client.readPump()
+}
+
+func (c *Client) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+	c.conn.SetReadLimit(maxMessageSize)
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	for {
+		_, message, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error: %v", err)
+			}
+			break
+		}
+		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
+		message = utils.CheckTypeOfMessage(string(message), c.conn.RemoteAddr().String()).([]byte)
+		c.hub.broadcast <- message
+	}
+}
+
+func (c *Client) writePump() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
+	for {
+		select {
+		case message, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			fmt.Println("message inside writePump: ", string(message))
+			if !ok {
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			w, err := c.conn.NextWriter(websocket.TextMessage)
+			if err != nil {
+				return
+			}
+
+			w.Write(message)
+			n := len(c.send)
+			for i := 0; i < n; i++ {
+				w.Write(newline)
+				w.Write(<-c.send)
+			}
+
+			if err := w.Close(); err != nil {
+				return
+			}
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func getClientAddresses(clients []*Client) []string {
+	addresses := make([]string, len(clients))
+	for i, client := range clients {
+		addresses[i] = client.conn.RemoteAddr().String()
+	}
+	return addresses
 }
 
 func main() {
