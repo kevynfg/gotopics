@@ -12,9 +12,15 @@ import (
 type Message struct {
 	Type string `json:"type"`
 	Data struct {
-		RoomId   string   `json:"roomId,omitempty"`
-		Id       string   `json:"id,omitempty"`
-		Message  string   `json:"message,omitempty"`
+		RoomId  string `json:"roomId,omitempty"`
+		Id      string `json:"id,omitempty"`
+		Message struct {
+			Question string `json:"question,omitempty"`
+			Answer   string `json:"answer,omitempty"`
+			Round    int    `json:"round,omitempty"`
+			Topic    string `json:"topic,omitempty"`
+			RoundQtt int    `json:"roundQtt,omitempty"`
+		} `json:"message,omitempty"`
 		Host     string   `json:"host,omitempty"`
 		Receiver string   `json:"receiver,omitempty"`
 		Users    []string `json:"users,omitempty"`
@@ -79,8 +85,10 @@ func CheckTypeOfMessage(incomingMessage string, client string) interface{} {
 		event := map[string]interface{}{
 			"type": "room-created",
 			"data": map[string]interface{}{
-				"roomId": roomID,
-				"host":   client,
+				"roomId":      roomID,
+				"host":        client,
+				"topic":       message.Data.Message.Topic,
+				"totalRounds": message.Data.Message.RoundQtt,
 			},
 		}
 		encodedMessage, err := json.Marshal(event)
@@ -95,7 +103,7 @@ func CheckTypeOfMessage(incomingMessage string, client string) interface{} {
 			"type": "room-joined",
 			"data": map[string]interface{}{
 				"roomId": message.Data.RoomId,
-				"host":   client,
+				"client": client,
 			},
 		}
 		encodedMessage, err := json.Marshal(event)
@@ -197,18 +205,27 @@ func (m Pong) GetType() string {
 	return m.Type
 }
 
+type Question struct {
+	Answer string `json:"answer,omitempty"`
+	Player string `json:"player,omitempty"`
+}
+
 type CreatedRoomMessage struct {
 	Type string `json:"type"`
 	Data struct {
-		Host   string `json:"host"`
-		RoomID string `json:"roomId"`
+		Host        string               `json:"host"`
+		RoomID      string               `json:"roomId"`
+		Topic       string               `json:"topic,omitempty"`
+		Round       int                  `json:"round,omitempty"`
+		Question    map[string]*Question `json:"question,omitempty"`
+		TotalRounds int                  `json:"totalRounds,omitempty"`
 	} `json:"data"`
 }
 
 type RoomJoinedEvent struct {
 	Type string `json:"type"`
 	Data struct {
-		Host   string `json:"host"`
+		Client string `json:"client"`
 		RoomID string `json:"roomId"`
 	} `json:"data"`
 }
