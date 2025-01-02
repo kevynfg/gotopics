@@ -39,7 +39,7 @@ const (
 	pingPeriod = (pongWait * 9) / 10
 
 	// Maximum message size allowed from peer.
-	maxMessageSize = 512
+	maxMessageSize = 2048
 )
 
 type Hub struct {
@@ -56,9 +56,13 @@ type Hub struct {
 	unregister chan *Client
 
 	// Rooms to store clients
-	rooms    map[string][]*Client // key is the room id and value is the list of clients
+	rooms map[string][]*Client // key is the room id and value is the list of clients
+
+	// Room data to store room information
 	roomData map[string]interface{}
-	mu       sync.RWMutex
+
+	// Mutex to protect the rooms map
+	mu sync.RWMutex
 }
 
 func NewHub() *Hub {
@@ -73,22 +77,23 @@ func NewHub() *Hub {
 }
 
 func (h *Hub) Run() {
-	var incomingMessage string
+	var incoming_message string
 	for {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			clientInfo := map[string]interface{}{
+			client_info := map[string]interface{}{
 				"type":   "client-login",
 				"client": client.conn.RemoteAddr().String(),
 			}
-			incomingMessageBytes, err := json.Marshal(clientInfo)
+			incoming_message_bytes, err := json.Marshal(client_info)
 			if err != nil {
 				fmt.Println("error marshaling incoming message for user info: ", err)
 				return
 			}
-			incomingMessage = string(incomingMessageBytes)
-			client.send <- []byte(incomingMessage)
+			incoming_message = string(incoming_message_bytes)
+			fmt.Println("incoming_message:Run: ", incoming_message)
+			client.send <- []byte(incoming_message)
 		case client := <-h.unregister:
 			fmt.Println("client inside unregister: ", client)
 			if _, ok := h.clients[client]; ok {
@@ -100,138 +105,135 @@ func (h *Hub) Run() {
 		case message := <-h.broadcast:
 			fmt.Println("message inside broadcast: ", string(message))
 
-			msgType, err := utils.ProcessMessage(message)
+			msg_type, err := utils.ProcessMessage(message)
 			if err != nil {
 				fmt.Println("error processing message: ", err)
 				return
 			}
 
-			host := ""
-			var foundClient *Client
-			switch msg := msgType.(type) {
+			switch msg := msg_type.(type) {
 			case *utils.CreatedRoomMessage:
 				fmt.Println("CreatedRoomMessage: ", msg)
-				messageTypes := []string{"room-created", "room-joined", "room-message"}
-				if utils.Contains(messageTypes, msg.Type) {
-					host = msg.Data.Host
-					for client := range h.clients {
-						if client.conn.RemoteAddr().String() == host {
-							foundClient = client
-							break
-						}
-					}
-				}
+				h.handleCreatedRoomMessage(msg)
+			case *utils.RoomJoinedEvent:
+				fmt.Println("RoomJoinedEvent: ", msg)
+				h.handleRoomJoinedEvent(msg)
+			case *utils.RoomMessage:
+				fmt.Println("RoomMessage: ", msg)
+				h.handleRoomMessage(msg, message)
+			case *utils.SaveTopic:
+				fmt.Println("SaveTopic: ", msg)
+				h.handleSaveTopic(msg, message)
 			}
+		}
+	}
+}
 
-			for client := range h.clients {
-				if client == foundClient && msgType.GetType() != "room-created" {
-					fmt.Println("found client, skipping message: ", client)
-					continue
-				}
-				if msgType.GetType() == "room-joined" {
-					fmt.Println("room-joined if: ", msgType.(*utils.RoomJoinedEvent).Data.RoomID)
-					h.mu.RLock()
-					_, ok := h.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID]
-					fmt.Println("room-joined if -> res: ", ok)
-					h.mu.RUnlock()
-					if ok {
-						if client.conn.RemoteAddr().String() == msgType.(*utils.RoomJoinedEvent).Data.Client {
-							client.hub.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID] = append(client.hub.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID], client)
-						}
-						joinMessageForRoom := map[string]interface{}{
-							"type":        "welcome-message",
-							"client":      msgType.(*utils.RoomJoinedEvent).Data.Client,
-							"roomId":      msgType.(*utils.RoomJoinedEvent).Data.RoomID,
-							"message":     "Welcome to the room",
-							"clients":     getClientAddresses(h.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID]),
-							"isNewMember": true,
-							"roomData":    h.roomData[msgType.(*utils.RoomJoinedEvent).Data.RoomID],
-						}
-						incomingMessageBytes, err := json.Marshal(joinMessageForRoom)
-						if err != nil {
-							fmt.Println("error marshaling incoming message: ", err)
-							return
-						}
-						h.mu.RLock()
-						fmt.Println("room after add: ", h.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID])
-						h.mu.RUnlock()
+func (h *Hub) handleCreatedRoomMessage(msg *utils.CreatedRoomMessage) {
+	host := msg.Data.Host
+	var found_client *Client
+	for client := range h.clients {
+		if client.conn.RemoteAddr().String() == host {
+			found_client = client
+			break
+		}
+	}
 
-						h.mu.RLock()
-						for _, c := range h.rooms[msgType.(*utils.RoomJoinedEvent).Data.RoomID] {
-							fmt.Println("client loop: ", c.conn.RemoteAddr().String())
-							if c.conn.RemoteAddr().String() != msgType.(*utils.RoomJoinedEvent).Data.Client {
-								continue
-							}
-							incomingMessage = string(incomingMessageBytes)
-						}
-						h.mu.RUnlock()
-					}
-				}
+	if found_client != nil {
+		found_client.hub.rooms[msg.Data.RoomID] = append(found_client.hub.rooms[msg.Data.RoomID], found_client)
+		fmt.Println("room created and client joined: ", found_client.hub.rooms)
+		fmt.Println("room-created:client: ", found_client.conn.RemoteAddr().String())
+		fmt.Println("room-created:data: ", msg.Data)
+		incoming_message_map := map[string]interface{}{
+			"type":    "room-created",
+			"host":    msg.Data.Host,
+			"roomId":  msg.Data.RoomID,
+			"topic":   msg.Data.Topic,
+			"rounds":  msg.Data.TotalRounds,
+			"clients": getClientAddresses(h.rooms[msg.Data.RoomID]),
+		}
+		if _, ok := h.roomData[msg.Data.RoomID]; !ok {
+			h.roomData[msg.Data.RoomID] = []interface{}{}
+		}
+		h.roomData[msg.Data.RoomID] = append(h.roomData[msg.Data.RoomID].([]interface{}),
+			map[string]interface{}{
+				"host":   msg.Data.Host,
+				"roomId": msg.Data.RoomID,
+				"topic":  msg.Data.Topic,
+				"rounds": msg.Data.TotalRounds,
+			})
+		incoming_message_bytes, err := json.Marshal(incoming_message_map)
+		if err != nil {
+			fmt.Println("error marshaling incoming message handleCreatedRoomMessage: ", err)
+			return
+		}
+		incoming_message := string(incoming_message_bytes)
+		h.sendMessageToRoom(msg.Data.RoomID, incoming_message)
+	}
+}
 
-				if msgType.GetType() == "room-created" {
-					if client.conn.RemoteAddr().String() != msgType.(*utils.CreatedRoomMessage).Data.Host {
-						continue
-					}
-					client.hub.rooms[msgType.(*utils.CreatedRoomMessage).Data.RoomID] = append(client.hub.rooms[msgType.(*utils.CreatedRoomMessage).Data.RoomID], client)
-					fmt.Println("room created and client joined: ", client.hub.rooms)
-					fmt.Println("room-created:client: ", client.conn.RemoteAddr().String())
-					fmt.Println("room-created:data: ", msgType.(*utils.CreatedRoomMessage).Data)
-					incomingMessageMap := map[string]interface{}{
-						"type":    "room-created",
-						"host":    msgType.(*utils.CreatedRoomMessage).Data.Host,
-						"roomId":  msgType.(*utils.CreatedRoomMessage).Data.RoomID,
-						"topic":   msgType.(*utils.CreatedRoomMessage).Data.Topic,
-						"rounds":  msgType.(*utils.CreatedRoomMessage).Data.TotalRounds,
-						"clients": getClientAddresses(h.rooms[msgType.(*utils.CreatedRoomMessage).Data.RoomID]),
-					}
-					if _, ok := h.roomData[msgType.(*utils.CreatedRoomMessage).Data.RoomID].([]interface{}); !ok {
-						h.roomData[msgType.(*utils.CreatedRoomMessage).Data.RoomID] = []interface{}{}
-					}
-					h.roomData[msgType.(*utils.CreatedRoomMessage).Data.RoomID] = append(h.roomData[msgType.(*utils.CreatedRoomMessage).Data.RoomID].([]interface{}),
-						map[string]interface{}{
-							"host":   msgType.(*utils.CreatedRoomMessage).Data.Host,
-							"roomId": msgType.(*utils.CreatedRoomMessage).Data.RoomID,
-							"topic":  msgType.(*utils.CreatedRoomMessage).Data.Topic,
-							"rounds": msgType.(*utils.CreatedRoomMessage).Data.TotalRounds,
-						})
-					incomingMessageBytes, err := json.Marshal(incomingMessageMap)
-					if err != nil {
-						fmt.Println("error marshaling incoming message: ", err)
-						return
-					}
-					incomingMessage = string(incomingMessageBytes)
-				}
-
-				if msgType.GetType() == "room-message" {
-					fmt.Println("room-message: ", msgType.(*utils.RoomMessage).Data.RoomID)
-					h.mu.RLock()
-					_, ok := h.rooms[msgType.(*utils.RoomMessage).Data.RoomID]
-					fmt.Println("room-message -> res: ", ok)
-					h.mu.RUnlock()
-					if ok {
-						h.mu.RLock()
-						for _, c := range h.rooms[msgType.(*utils.RoomMessage).Data.RoomID] {
-							fmt.Println("client loop: ", c.conn.RemoteAddr().String())
-							// if c.conn.RemoteAddr().String() == msgType.(*utils.RoomMessage).Data.Host {
-							// 	continue
-							// }
-							if !utils.Contains(getClientAddresses(h.rooms[msgType.(*utils.RoomMessage).Data.RoomID]), client.conn.RemoteAddr().String()) {
-								continue
-							}
-							incomingMessage = string(message)
-						}
-						h.mu.RUnlock()
-					}
-				}
-				fmt.Println("Message: ", incomingMessage)
-				select {
-				case client.send <- []byte(incomingMessage):
-				default:
-					close(client.send)
-					delete(h.clients, client)
-					delete(h.rooms, client.conn.RemoteAddr().String())
-				}
+func (h *Hub) handleRoomJoinedEvent(msg *utils.RoomJoinedEvent) {
+	h.mu.RLock()
+	_, ok := h.rooms[msg.Data.RoomID]
+	h.mu.RUnlock()
+	if ok {
+		for client := range h.clients {
+			if client.conn.RemoteAddr().String() == msg.Data.Client {
+				client.hub.rooms[msg.Data.RoomID] = append(client.hub.rooms[msg.Data.RoomID], client)
+				break
 			}
+		}
+		join_message_for_room := map[string]interface{}{
+			"type": "welcome-message",
+			"data": map[string]interface{}{
+				"client":      msg.Data.Client,
+				"roomId":      msg.Data.RoomID,
+				"message":     "Welcome to the room",
+				"clients":     getClientAddresses(h.rooms[msg.Data.RoomID]),
+				"isNewMember": true,
+				"roomData":    h.roomData[msg.Data.RoomID],
+			},
+		}
+		incoming_message_bytes, err := json.Marshal(join_message_for_room)
+		if err != nil {
+			fmt.Println("error marshaling incoming message handleRoomJoinedEvent: ", err)
+			return
+		}
+		incoming_message := string(incoming_message_bytes)
+		h.sendMessageToRoom(msg.Data.RoomID, incoming_message)
+	}
+}
+
+func (h *Hub) handleRoomMessage(msg *utils.RoomMessage, original_message []byte) {
+	h.mu.RLock()
+	_, ok := h.rooms[msg.Data.RoomID]
+	h.mu.RUnlock()
+	if ok {
+		incoming_message := string(original_message)
+		h.sendMessageToRoom(msg.Data.RoomID, incoming_message)
+	}
+}
+
+func (h *Hub) handleSaveTopic(msg *utils.SaveTopic, original_message []byte) {
+	h.mu.RLock()
+	_, ok := h.rooms[msg.Data.RoomID]
+	h.mu.RUnlock()
+	if ok {
+		incoming_message := string(original_message)
+		h.sendMessageToRoom(msg.Data.RoomID, incoming_message)
+	}
+}
+
+func (h *Hub) sendMessageToRoom(roomId string, message string) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, client := range h.rooms[roomId] {
+		select {
+		case client.send <- []byte(message):
+		default:
+			close(client.send)
+			delete(h.clients, client)
+			delete(h.rooms, client.conn.RemoteAddr().String())
 		}
 	}
 }
@@ -256,8 +258,8 @@ func handler(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		send: make(chan []byte, 256),
 	}
 	client.hub.register <- client
-	go client.writePump()
 	go client.readPump()
+	go client.writePump()
 }
 
 func (c *Client) readPump() {
@@ -270,14 +272,19 @@ func (c *Client) readPump() {
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
 		_, message, err := c.conn.ReadMessage()
+		var valid bool
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("error:readPump: %v", err)
 			}
 			break
 		}
 		message = bytes.TrimSpace(bytes.Replace(message, newline, space, -1))
-		message = utils.CheckTypeOfMessage(string(message), c.conn.RemoteAddr().String()).([]byte)
+		message, valid = utils.CheckTypeOfMessage(message, c.conn.RemoteAddr().String())
+		if !valid {
+			log.Println("invalid message:readPump: ", string(message))
+			return
+		}
 		c.hub.broadcast <- message
 	}
 }
@@ -291,18 +298,21 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
+			log.Println("message:writePump: ", string(message))
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-			fmt.Println("message inside writePump: ", string(message))
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				err := c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				// log.Fatalf("error writing close message: %v", err)
+				log.Println("error writing message", message, err)
+				c.conn.Close()
 				return
 			}
 
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
+				fmt.Println("error getting writer: ", err)
 				return
 			}
-
 			w.Write(message)
 			n := len(c.send)
 			for i := 0; i < n; i++ {
@@ -311,11 +321,13 @@ func (c *Client) writePump() {
 			}
 
 			if err := w.Close(); err != nil {
+				log.Println("error closing writer: ", err)
 				return
 			}
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Println("error writing ping message: ", err)
 				return
 			}
 		}
