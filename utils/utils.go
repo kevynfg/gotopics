@@ -8,6 +8,47 @@ import (
 	"github.com/google/uuid"
 )
 
+type RoomData interface {
+	GetHost() string
+	GetRoomID() string
+	GetTopic() string
+	GetTotalRounds() int
+	GetPlayersInfo() []PlayerInfo
+}
+
+type PlayerInfo struct {
+	Nickname string `json:"nickname"`
+	Client   string `json:"client"`
+}
+
+type RoomDataImpl struct {
+	Host        string       `json:"host"`
+	RoomID      string       `json:"roomId"`
+	Topic       string       `json:"topic"`
+	TotalRounds int          `json:"totalRounds"`
+	PlayersInfo []PlayerInfo `json:"playersInfo"`
+}
+
+func (r RoomDataImpl) GetHost() string {
+	return r.Host
+}
+
+func (r RoomDataImpl) GetRoomID() string {
+	return r.RoomID
+}
+
+func (r RoomDataImpl) GetTopic() string {
+	return r.Topic
+}
+
+func (r RoomDataImpl) GetTotalRounds() int {
+	return r.TotalRounds
+}
+
+func (r RoomDataImpl) GetPlayersInfo() []PlayerInfo {
+	return r.PlayersInfo
+}
+
 type BoolString bool
 
 func (b *BoolString) UnmarshalJSON(data []byte) error {
@@ -93,7 +134,8 @@ type RoomMessage struct {
 type JoinRoom struct {
 	Type string `json:"type"`
 	Data struct {
-		RoomId string `json:"roomId"`
+		RoomId   string `json:"roomId"`
+		Nickname string `json:"nickname"`
 	} `json:"data"`
 }
 
@@ -103,6 +145,7 @@ type CreateRoom struct {
 		Name     string `json:"name"`
 		Topic    string `json:"topic"`
 		RoundQtt int    `json:"roundQtt"`
+		Nickname string `json:"nickname"`
 	} `json:"data"`
 }
 
@@ -125,6 +168,7 @@ func CheckTypeOfMessage(incomingMessage []byte, client string) ([]byte, bool) {
 		return nil, false
 	}
 	fmt.Println("messageType:CheckTypeOfMessage: ", messageType)
+	fmt.Println("messageType:CONTENT: ", string(incomingMessage))
 
 	switch messageType.Type {
 	case "ping":
@@ -168,6 +212,7 @@ func CheckTypeOfMessage(incomingMessage []byte, client string) ([]byte, bool) {
 				"name":        createRoomMsg.Data.Name,
 				"topic":       createRoomMsg.Data.Topic,
 				"totalRounds": createRoomMsg.Data.RoundQtt,
+				"nickname":    createRoomMsg.Data.Nickname,
 			},
 		}
 		encodedMessage, err := json.Marshal(event)
@@ -186,8 +231,9 @@ func CheckTypeOfMessage(incomingMessage []byte, client string) ([]byte, bool) {
 		event := map[string]interface{}{
 			"type": "room-joined",
 			"data": map[string]interface{}{
-				"roomId": joinRoomMsg.Data.RoomId,
-				"client": client,
+				"roomId":   joinRoomMsg.Data.RoomId,
+				"client":   client,
+				"nickname": joinRoomMsg.Data.Nickname,
 			},
 		}
 		encodedMessage, err := json.Marshal(event)
@@ -220,9 +266,7 @@ func CheckTypeOfMessage(incomingMessage []byte, client string) ([]byte, bool) {
 	case "start-game":
 		event := map[string]interface{}{
 			"type": "game-started",
-			"data": map[string]interface{}{
-				// "roomId": message.Data.RoomId,
-			},
+			"data": map[string]interface{}{},
 		}
 		encodedMessage := EncodeMessage(event)
 		if encodedMessage == nil {
@@ -329,14 +373,16 @@ type CreatedRoomMessage struct {
 		Round       int                  `json:"round,omitempty"`
 		Question    map[string]*Question `json:"question,omitempty"`
 		TotalRounds int                  `json:"totalRounds,omitempty"`
+		Nickname    string               `json:"nickname,omitempty"`
 	} `json:"data"`
 }
 
 type RoomJoinedEvent struct {
 	Type string `json:"type"`
 	Data struct {
-		Client string `json:"client"`
-		RoomID string `json:"roomId"`
+		Client   string `json:"client"`
+		RoomID   string `json:"roomId"`
+		Nickname string `json:"nickname"`
 	} `json:"data"`
 }
 
