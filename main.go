@@ -61,6 +61,9 @@ type Hub struct {
 	// Room data to store room information
 	roomData map[string]interface{}
 
+	// Room data quiz to store quiz information
+	roomDataQuiz map[string]interface{}
+
 	// Mutex to protect the rooms map
 	mu sync.RWMutex
 }
@@ -124,6 +127,33 @@ func (h *Hub) Run() {
 			case *utils.SaveTopic:
 				fmt.Println("SaveTopic: ", msg)
 				h.handleSaveTopic(msg, message)
+			case *utils.GameStarted:
+				fmt.Println("GameStarted: ", msg)
+				h.mu.RLock()
+				_, ok := h.rooms[msg.Data.RoomID]
+				if ok {
+					incoming_message := string(message)
+					h.sendMessageToRoom(msg.Data.RoomID, incoming_message)
+					h.mu.RUnlock()
+				}
+			case *utils.RoundSaved:
+				fmt.Println("RoundSaved: ", msg)
+				h.mu.RLock()
+				_, ok := h.rooms[msg.Data.RoomID]
+				if ok {
+					incoming_message := string(message)
+					h.sendMessageToRoom(msg.Data.RoomID, incoming_message)
+					h.mu.RUnlock()
+				}
+			case *utils.PlayerAnswer:
+				fmt.Println("PlayerAnswer: ", msg)
+				h.mu.RLock()
+				_, ok := h.rooms[msg.Data.RoomID]
+				if ok {
+					incoming_message := string(message)
+					h.sendMessageToRoom(msg.Data.RoomID, incoming_message)
+					h.mu.RUnlock()
+				}
 			}
 		}
 	}
@@ -155,11 +185,12 @@ func (h *Hub) handleCreatedRoomMessage(msg *utils.CreatedRoomMessage) {
 		}
 
 		roomData := utils.RoomDataImpl{
-			Host:        msg.Data.Host,
-			RoomID:      msg.Data.RoomID,
-			Topic:       msg.Data.Topic,
-			TotalRounds: msg.Data.TotalRounds,
-			PlayersInfo: makePlayersInfo(h.rooms[msg.Data.RoomID], msg.Data.Nickname),
+			Host:         msg.Data.Host,
+			RoomID:       msg.Data.RoomID,
+			Topic:        msg.Data.Topic,
+			TotalRounds:  msg.Data.TotalRounds,
+			PlayersInfo:  makePlayersInfo(h.rooms[msg.Data.RoomID], msg.Data.Nickname),
+			CurrentRound: 1,
 		}
 		if _, ok := h.roomData[msg.Data.RoomID]; !ok {
 			fmt.Println("Is not ok: ", ok)
@@ -234,6 +265,8 @@ func (h *Hub) handleSaveTopic(msg *utils.SaveTopic, original_message []byte) {
 	h.mu.RUnlock()
 	if ok {
 		incoming_message := string(original_message)
+		h.roomData[msg.Data.RoomID].([]utils.RoomDataImpl)[0].TopicData = msg.Data.TopicData
+		fmt.Println("roomData handleSaveTopic: ", h.roomData)
 		h.sendMessageToRoom(msg.Data.RoomID, incoming_message)
 	}
 }

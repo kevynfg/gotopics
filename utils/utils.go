@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/google/uuid"
+	// qrcode "github.com/skip2/go-qrcode"
 )
 
 type RoomData interface {
@@ -22,11 +23,13 @@ type PlayerInfo struct {
 }
 
 type RoomDataImpl struct {
-	Host        string       `json:"host"`
-	RoomID      string       `json:"roomId"`
-	Topic       string       `json:"topic"`
-	TotalRounds int          `json:"totalRounds"`
-	PlayersInfo []PlayerInfo `json:"playersInfo"`
+	Host         string       `json:"host"`
+	RoomID       string       `json:"roomId"`
+	Topic        string       `json:"topic"`
+	TotalRounds  int          `json:"totalRounds"`
+	PlayersInfo  []PlayerInfo `json:"playersInfo"`
+	TopicData    []QuizzItem  `json:"topicData"`
+	CurrentRound int          `json:"currentRound"`
 }
 
 func (r RoomDataImpl) GetHost() string {
@@ -75,20 +78,20 @@ type Answer struct {
 }
 
 type CorrectAnswers struct {
-	AnswerACorrect bool `json:"answer_a_correct"`
-	AnswerBCorrect bool `json:"answer_b_correct"`
-	AnswerCCorrect bool `json:"answer_c_correct"`
-	AnswerDCorrect bool `json:"answer_d_correct"`
-	AnswerECorrect bool `json:"answer_e_correct"`
-	AnswerFCorrect bool `json:"answer_f_correct"`
+	AnswerACorrect string `json:"answer_a_correct"`
+	AnswerBCorrect string `json:"answer_b_correct"`
+	AnswerCCorrect string `json:"answer_c_correct"`
+	AnswerDCorrect string `json:"answer_d_correct"`
+	AnswerECorrect string `json:"answer_e_correct"`
+	AnswerFCorrect string `json:"answer_f_correct"`
 }
 
 type QuizzItem struct {
-	Id                     *string        `json:"id,omitempty"`
+	Id                     *json.Number   `json:"id,omitempty"`
 	Question               *string        `json:"question,omitempty"`
 	Description            *string        `json:"description,omitempty"`
 	Answers                Answer         `json:"answers,omitempty"`
-	MultipleCorrectAnswers *bool          `json:"multiple_correct_answers,omitempty"`
+	MultipleCorrectAnswers *string        `json:"multiple_correct_answers,omitempty"`
 	CorrectAnswers         CorrectAnswers `json:"correct_answers,omitempty"`
 	CorrectAnswer          *string        `json:"correct_answer,omitempty"`
 	Explanation            *string        `json:"explanation,omitempty"`
@@ -147,6 +150,16 @@ type CreateRoom struct {
 		RoundQtt int    `json:"roundQtt"`
 		Nickname string `json:"nickname"`
 	} `json:"data"`
+}
+
+type PlayerAnswer struct {
+	Type string `json:"type"`
+	Data struct {
+		RoomID   string `json:"roomId"`
+		Answer   string `json:"answer"`
+		Player   string `json:"player"`
+		Nickname string `json:"nickname"`
+	}
 }
 
 func Contains(s []string, e string) bool {
@@ -264,13 +277,79 @@ func CheckTypeOfMessage(incomingMessage []byte, client string) ([]byte, bool) {
 		}
 		return encodedMessage, true
 	case "start-game":
+		var startGameMsg GameStarted
+		if err := json.Unmarshal(incomingMessage, &startGameMsg); err != nil {
+			log.Default().Println("error Unmarshal start-game: ", err)
+			return nil, false
+		}
 		event := map[string]interface{}{
 			"type": "game-started",
-			"data": map[string]interface{}{},
+			"data": map[string]interface{}{
+				"message":      "game started",
+				"roomId":       startGameMsg.Data.RoomID,
+				"topic":        startGameMsg.Data.Topic,
+				"rounds":       startGameMsg.Data.Rounds,
+				"topicData":    startGameMsg.Data.TopicData,
+				"currentRound": startGameMsg.Data.CurrentRound,
+			},
 		}
 		encodedMessage := EncodeMessage(event)
 		if encodedMessage == nil {
 			log.Default().Println("error Marshal start-game")
+			return nil, false
+		}
+		return encodedMessage, true
+	case "round-ended":
+		var gameEnded RoundSaved
+		if err := json.Unmarshal(incomingMessage, &gameEnded); err != nil {
+			log.Default().Println("error Unmarshal start-game: ", err)
+			return nil, false
+		}
+
+		completed := false
+		round := gameEnded.Data.CurrentRound + 1
+
+		if round > gameEnded.Data.Rounds {
+			round = gameEnded.Data.Rounds
+			completed = true
+		}
+
+		event := map[string]interface{}{
+			"type": "round-saved",
+			"data": map[string]interface{}{
+				"message":      "Round saved",
+				"roomId":       gameEnded.Data.RoomID,
+				"topic":        gameEnded.Data.Topic,
+				"rounds":       gameEnded.Data.Rounds,
+				"topicData":    gameEnded.Data.TopicData,
+				"currentRound": round,
+				"completed":    completed,
+			},
+		}
+		encodedMessage := EncodeMessage(event)
+		if encodedMessage == nil {
+			log.Default().Println("error Marshal start-game")
+			return nil, false
+		}
+		return encodedMessage, true
+	case "player-answer":
+		var playerAnswerMsg PlayerAnswer
+		if err := json.Unmarshal(incomingMessage, &playerAnswerMsg); err != nil {
+			log.Default().Println("error Unmarshal player-answer: ", err)
+			return nil, false
+		}
+		event := map[string]interface{}{
+			"type": "player-answer",
+			"data": map[string]interface{}{
+				"roomId":   playerAnswerMsg.Data.RoomID,
+				"answer":   playerAnswerMsg.Data.Answer,
+				"player":   playerAnswerMsg.Data.Player,
+				"nickname": playerAnswerMsg.Data.Nickname,
+			},
+		}
+		encodedMessage := EncodeMessage(event)
+		if encodedMessage == nil {
+			log.Default().Println("error Marshal player-answer")
 			return nil, false
 		}
 		return encodedMessage, true
@@ -359,6 +438,18 @@ func (m Pong) GetType() string {
 	return m.Type
 }
 
+func (m GameStarted) GetType() string {
+	return m.Type
+}
+
+func (m RoundSaved) GetType() string {
+	return m.Type
+}
+
+func (m PlayerAnswer) GetType() string {
+	return m.Type
+}
+
 type Question struct {
 	Answer string `json:"answer,omitempty"`
 	Player string `json:"player,omitempty"`
@@ -418,6 +509,31 @@ type Pong struct {
 	} `json:"data"`
 }
 
+type GameStarted struct {
+	Type string `json:"type"`
+	Data struct {
+		Message      string      `json:"message"`
+		RoomID       string      `json:"roomId"`
+		Rounds       int         `json:"rounds"`
+		Topic        string      `json:"topic"`
+		TopicData    []QuizzItem `json:"topicData"`
+		CurrentRound int         `json:"currentRound"`
+	} `json:"data"`
+}
+
+type RoundSaved struct {
+	Type string `json:"type"`
+	Data struct {
+		Message       string      `json:"message"`
+		RoomID        string      `json:"roomId"`
+		Rounds        int         `json:"rounds"`
+		Topic         string      `json:"topic"`
+		TopicData     []QuizzItem `json:"topicData"`
+		CurrentRound  int         `json:"currentRound"`
+		GameCompleted bool        `json:"gameCompleted"`
+	} `json:"data"`
+}
+
 var messageTypes = map[string]func() MessageType{
 	"room-created":    func() MessageType { return &CreatedRoomMessage{} },
 	"room-joined":     func() MessageType { return &RoomJoinedEvent{} },
@@ -426,6 +542,9 @@ var messageTypes = map[string]func() MessageType{
 	"join-app":        func() MessageType { return &JoinApp{} },
 	"topic-saved":     func() MessageType { return &SaveTopic{} },
 	"pong":            func() MessageType { return &Pong{} },
+	"game-started":    func() MessageType { return &GameStarted{} },
+	"round-saved":     func() MessageType { return &RoundSaved{} },
+	"player-answer":   func() MessageType { return &PlayerAnswer{} },
 }
 
 func ProcessMessage(message []byte) (MessageType, error) {
@@ -451,3 +570,31 @@ func ProcessMessage(message []byte) (MessageType, error) {
 
 	return msg, nil
 }
+
+// func (c *client) sendPNGFile() {
+// 	err := qrcode.WriteFile(url+c.room.Id, qrcode.Medium, 256, c.room.Id+".png") // URL -> deve ser o caminho para entrar em uma sala
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+// 	defer func() {
+// 		err := os.Remove(c.room.Id + ".png")
+// 		if err != nil {
+// 			log.Fatal(err)
+// 		}
+// 	}()
+
+// 	file, err := os.Open(c.room.Id + ".png")
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+// 	defer file.Close()
+
+// 	fileBytes, err := io.ReadAll(file)
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+// 	err = c.socket.WriteMessage(websocket.BinaryMessage, fileBytes)
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+// }
